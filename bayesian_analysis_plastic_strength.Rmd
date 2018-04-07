@@ -1,0 +1,472 @@
+---
+title: "Bayesian Analysis of the Plastic Strength"
+author: "Gabriel_Nespoli"
+date: "26 settembre 2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rjags)
+require(R2jags)
+require(Metrics)
+library(ggmcmc)
+```
+
+Bayesian approach to evaluate plastic strength
+
+In this project I studied the plastic strength using Bayesian Analysis framework. The ideia was to develop statistical models to approximate the distribution of the data. The models were developed with the package rjags. 
+
+The dataset used is named Plastic Strength Data (Full Set) is available in http://www.itl.nist.gov/div898/education/datasets.htm. The original data has 1650 observations and 3 variables, but I decided to use just 100 observations randomly chosen.
+
+```{r}
+df_full = read.table("plastic_full.dat", header = TRUE)
+set.seed(123)
+df = df_full[sample(nrow(df_full),size = 100),]
+Y = df$Strength
+X = df[,2:3]
+n = length(Y)
+hist(Y, xlab="Plastic strength (MPa)")
+```
+
+In this scenarios two factors can affect how resistent a plastic can be: temperature and pressure inflicted on it. The increase of pressure decreases the plastic resistance, meanwhile the temperature and the strength have a positive correlation. 
+
+```{r}
+plot(x = df$Temperature, y = Y, ylab="Plastic strength (MPa)", xlab="Temperature (F?)")
+plot(x = df$Pressure, y = Y, ylab="Plastic strength (MPa)", xlab="Pressure (bar)")
+```
+
+I needed to quantify and figure out how they work together to influence the plastic resistance. This is essencial in the data generating process.
+
+```{r, echo=F}
+set.seed(123)
+df_full = read.table("plastic_full.dat", header = TRUE)
+df = df_full[sample(nrow(df_full),size = 100),]
+```
+
+The first approach was conceived by getting a mathematical linear equation that relates the features and the response variable. This was done by linear regression and followed the general rule for two variables:
+
+$$y = a +  \beta_1*x_1 + \beta_2*x_2$$
+
+Calculating the coefficients, then
+```{r}
+model = lm(formula = Strength ~ ., data = df)
+model$coefficients
+```
+
+Or, in short, the strength of the plastic with the prior coefficients is given by
+
+Strength = a +  b*Temperature + c*Pressure
+
+where a = -4.24, b = 0.19 and c = -0.97.
+
+In this first linear model, I worked with four variables: independent term (interception), the coefficient of the temperature, of the pressure and the standard deviation. The prior distribution of all variables are assumed to be the Normal distribution, as follow:
+
+$$a \sim N(-4.24, 0.4)$$
+$$b \sim N(0.19, 0.02)$$
+$$c \sim N(-0.97, 0.3)$$
+$$\sigma \sim N(0.2, 0.05)$$
+
+The standard deviation of each normal distribution was arbitrarily chosen.
+
+```{r}
+temp = df$Temperature
+pres = df$Pressure
+model.def <- "
+  model {
+    # Priors
+    a ~ dnorm(-4.24, 0.4);
+    b ~ dnorm(0.19, 0.02);
+    c ~ dnorm(-0.97, 0.3);
+    sigma ~ dnorm(0.2, 0.05);
+  
+    #likelihood
+    for(i in 1:n){
+      Y[i] ~ dnorm(a + b*temp[i] + c*pres[i], sigma)
+    }
+}"
+
+model.txt <- textConnection(model.def)
+```
+
+JAGS is a Gibbs Sampler, that is, a Monte Carlo Markov Chain, that approximate the posterior distribution of the parameters tracked.
+
+The initial state of the parameters was the same mean value of the parameters in the Normal distribution of them.
+
+```{r}
+# Initial parameter values
+inits=list("a"=-4.24, "b"=0.19, "c" = -0.97, "sigma"=0.2)
+
+# Parameters
+params=c("a","b", "c", "sigma")
+
+# Input data
+dd=list("Y" = Y, "temp" = temp, "pres" = pres, "n"=n)
+```
+
+Then, I run the model using two parallel Markov chains with 1000 iterations.
+
+```{r, results=F}
+# Execute the model
+j <- jags.model(model.txt, data=dd, n.chains=1,inits = inits, n.adapt = 1000)
+```
+
+According to JAGS documentation, it is always necessary to use the "update" function over the model because "The sequence of samples generated during this adaptive phase is not a Markov chain, and therefore may not be used for posterior inference on the model." This means that running the model in the adaptive phase can improve efficiency, but still is needed to burn-in the chain so that we will actually sample from the proper posterior distribution.
+
+```{r, results=F}
+update(j, 5000)
+```
+
+From now, it is taken that JAGS has generated the true approximation to the posterior distribution of our parameters, so I generated posterior samples of  the parameters.
+
+```{r, results=F}
+j.samples <- coda.samples(model=j,
+                             variable.names=c('a',
+                                              'b',
+                                              'c',
+                                              'sigma'),
+                             n.iter=10000)
+mod1=ggs(as.mcmc(j.samples))
+par(mar=c(2,1,1,1))
+plot(j.samples)
+```
+
+The posterior distribution of the parameters are given by:
+
+```{r, echo=F}
+j.samples <- do.call(rbind.data.frame, j.samples) # convert to dataframe
+cat("a.post ~ N(", mean(j.samples$a),",",sd(j.samples$a),")")
+cat("b.post ~ N(", mean(j.samples$b),",",sd(j.samples$b),")")
+cat("c.post ~ N(", mean(j.samples$c),",",sd(j.samples$c),")")
+cat("sigma.post ~ N(", mean(j.samples$sigma),",",sd(j.samples$sigma),")")
+```
+
+Comparing the prior and posterior of each parameter.
+
+```{r}
+a.prior = rnorm(n = 2000, mean =-4.24, sd = 0.4)
+a.post = rnorm(n = 2000, mean = mean(j.samples$a), sd = sd(j.samples$a))
+hist(a.prior,
+     col = rgb(0,0,1,0.3), breaks=10, xlim = c(-8,0),
+     ylim = c(0,1.5), probability = T, xlab = "a", main = "Prior and posterior of a")
+hist(a.post, add = T, probability = T, col = rgb(1,0,0,0.3), breaks=30)
+legend("topright", c("Prior", "Posterior"), col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)), lwd=10)
+
+b.prior = rnorm(n = 2000, mean = 0.19, sd = 0.02)
+b.post = rnorm(n = 2000, mean = mean(j.samples$b), sd = sd(j.samples$b))
+hist(b.prior,
+     col = rgb(0,0,1,0.3), breaks=30, xlim = c(0.12,0.25),
+     ylim = c(0,120), probability = T, xlab = "b", main = "Prior and posterior of b")
+hist(b.post, add = T, probability = T, col = rgb(1,0,0,0.3), breaks=5)
+legend("topright", c("Prior", "Posterior"), col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)), lwd=10)
+
+c.prior = rnorm(n = 2000, mean = -0.97, sd = 0.3)
+c.post = rnorm(n = 2000, mean = mean(j.samples$c), sd = sd(j.samples$c))
+hist(c.prior,
+     col = rgb(0,0,1,0.3), breaks=40, xlim = c(-1.8,0),
+     ylim = c(0,12), probability = T, xlab = "c", main = "Prior and posterior of c")
+hist(c.post, add = T, probability = T, col = rgb(1,0,0,0.3), breaks=5)
+legend("topright", c("Prior", "Posterior"), col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)), lwd=10)
+
+sigma.prior = rnorm(n = 2000, mean = 0.2, sd = 0.05)
+sigma.post = rnorm(n = 2000, mean = mean(j.samples$sigma), sd = sd(j.samples$sigma))
+hist(sigma.prior,
+     col = rgb(0,0,1,0.3), breaks=20, xlim = c(-0.1,0.8),
+     ylim = c(0,10), probability = T, xlab = "sigma", 
+     main = "Prior and posterior of sigma")
+hist(sigma.post, add = T, probability = T, col = rgb(1,0,0,0.3), breaks=20)
+legend("topright", c("Prior", "Posterior"), col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)), lwd=10)
+```
+
+After computing all the posterior distribution, the model can finally be summarized as
+
+```{r, echo=F}
+cat("Y.hat = N(", mean(j.samples$a),",",sd(j.samples$a),") + N(", mean(j.samples$b),",",sd(j.samples$b),")*Temperature \n + N(", mean(j.samples$c),",",sd(j.samples$c),")*Pressure + N(", mean(j.samples$sigma),",",sd(j.samples$sigma),")")
+```
+
+Following the previous equation, I could finally draw samples for the model
+
+```{r}
+Y.pred = rep(0, n)
+for(i in 1:n){
+  r = j.samples[sample(length(j.samples[[1]]), size = 1),]
+  Y.pred[i] = rnorm(n = 1, mean =  as.numeric(r["a"]) + as.numeric(r["b"])*temp[i] 
+                    + as.numeric(r["c"])*pres[i], sd = as.numeric(r["sigma"]))
+}
+df.pred = cbind(Y.pred, temp, pres)
+```
+
+Comparing the predicted data generated by the model and the observations:
+
+```{r}
+hist(Y.pred, col=rgb(0, 0, 1, 0.3), probability = T, breaks = 5, xlab="Plastic strength (MPa)")
+lines(density(Y), col=2)
+legend("topright", c("Observed", "Predicted"), col=c(2, 
+                                                     rgb(0,0,1,0.3)), lwd = 2)
+```
+
+Taking a look at the metrics mean, standard deviation and the mean-squared-error
+
+```{r, echo=F}
+cat("Mean of the observed data:", mean(Y))
+cat("Mean of the predicted data (model 1):", mean(Y.pred))
+cat("Standard deviation of the observed data:", sd(Y))
+cat("Standard deviation of the predicted data (model 1):", sd(Y.pred))
+cat("Mean-squared-error (model 1):",mse(actual = Y, predicted = Y.pred))
+```
+
+I decided to create another model trying to approximate more to the observed data. The idea was to make a simplification of the Gay-Lussac's Law for fluids and generalize it to the plastic, considering that it is an elastic and malleable solid and submit to high temperatures.
+
+The original Gay-Lussac's law is stated as: "the pressure of a gas of fixed mass and fixed volume,is directly proportional to the gas's absolute temperature". That is:
+
+$$\dfrac{P}{T} = cte$$
+
+Since the plastic keeps the same volume, I considered that it could attend the law. So, I defined the model as:
+
+```{r}
+set.seed(123)
+X = df[,3]/df[,2]
+df2 = as.data.frame(cbind(Y,X))
+plot(x = X, y = Y, main="Pressure/Temperature X Strength of plastic", ylab="Plastic strength (MPa)", xlab = "Pressure/Temperature")
+```
+
+It seemed to me that there is a considerable negative correlation between the variables, even though with a high error. I decided to keep the evaluation of this model. I used the same strategy to define the first belief of the parameters: executed the linear regression to recover the coefficients of the line.
+
+As now I used just one feature, the model will  follow a simple linear equation.
+
+$$y = a + b*X$$
+```{r}
+model2 = lm(formula = Y ~ X, data = df2)
+```
+
+After this, the coefficients a and b are
+
+```{r, echo=F}
+cat("a =",model2$coefficients[1])
+cat("b =",model2$coefficients[2])
+```
+
+In short, the response variable pursued the equation
+
+$$y = 51.56886 - 354.51144*X + \epsilon$$
+
+As before, the prior belief of the parameters was a Normal distribution, defined as
+
+$$a \sim N(51.56886, 2)$$
+$$b \sim N(-354.5114, 2)$$
+$$\sigma \sim N(0.5, 0.02)$$
+
+Then, before the Bayesian analysis, just with the prior distribution of the coefficients, the second model was defined as
+
+$$y =  N(51.56886, 2) + N(-354.51144, 2)*X + N(0.5, 0.02)$$
+I repeated the same steps before to define this second model, that is
+
+```{r, results=F}
+model2.def <- "
+  model {
+    # Priors
+    a ~ dnorm(51.56886, 2);
+    b ~ dnorm(-354.51144, 2);
+    sigma ~ dnorm(0.5, 0.02);
+  
+    #likelihood
+    for(i in 1:n){
+      Y[i] ~ dnorm(a + b*X[i], sigma)
+    }
+  }"
+
+model2.txt <- textConnection(model2.def)
+inits=list("a"=51.56886, "b"=-354.51144, "sigma"=0.5)
+params=c("a","b", "sigma") # Parameters
+dd=list("Y" = Y, "X" = X, "n"=n) # Create the data list
+
+# Do a MCMC
+j2 <- jags.model(model2.txt, data=dd, n.chains=1,
+                 inits = inits, n.adapt = 1000)
+update(j2, 5000)
+j2.samples <- coda.samples(model=j2,
+                          variable.names=c('a',
+                                           'b',
+                                           'sigma'),
+                          n.iter=10000)
+
+
+plot(j2.samples)
+```
+
+After computing the posterior distribution of the parameters, I got
+
+```{r, echo=F}
+j2.samples <- do.call(rbind.data.frame, j2.samples) # convert to dataframe
+cat("Y2.hat = N(", mean(j2.samples$a),",",sd(j2.samples$a),") + N(", mean(j2.samples$b),",",sd(j2.samples$b),")*X \n + N(", mean(j2.samples$sigma),",",sd(j2.samples$sigma),")")
+```
+
+Comparing the prior and posterior distribution of each coefficient, just like before, I got
+
+```{r}
+a2.prior = rnorm(n = 2000, mean = 51.56886, sd = 2)
+a2.post = rnorm(n = 2000, mean = mean(j2.samples$a), sd = sd(j2.samples$a))
+hist(a2.prior,
+     col = rgb(0,0,1,0.3), breaks=50,
+     ylim = c(0,1.5), probability = T, xlab = "a", xlim=c(47,57),
+     main = "Prior and posterior of a")
+hist(a2.post, add = T, probability = T, col = rgb(1,0,0,0.3), 
+     breaks=10)
+legend("topright", c("Prior", "Posterior"), col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)), lwd=10)
+
+b2.prior = rnorm(n = 2000, mean = -354.51144, sd = 2)
+b2.post = rnorm(n = 2000, mean = mean(j2.samples$b), sd = sd(j2.samples$b))
+hist(b2.prior,
+     col = rgb(0,0,1,0.3),breaks=30, probability = T,xlim=c(-361,-348), 
+     ylim = c(0, 0.6), xlab = "b", main = "Prior and posterior of b")
+hist(b2.post, add = T, probability = T, col = rgb(1,0,0,0.3), breaks=15)
+legend("topright", c("Prior", "Posterior"), col=c(rgb(0,0,1,0.3), 
+                                                  rgb(1,0,0,0.3)), lwd=10)
+
+sigma2.prior = rnorm(n = 2000, mean = 0.5, sd = 0.02)
+sigma2.post = rnorm(n = 2000, mean(j2.samples$sigma), sd = sd(j2.samples$sigma))
+hist(sigma2.prior,
+     col = rgb(0,0,1,0.3), breaks=15, xlim = c(0,0.6),
+     ylim = c(0,35), probability = T, xlab = "sigma", 
+     main = "Prior and posterior of sigma")
+hist(sigma2.post, add = T, probability = T, col = rgb(1,0,0,0.3), breaks=5)
+legend("topright", c("Prior", "Posterior"), 
+       col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)), lwd=10)
+```
+
+Again, with the posterior distribution of the parameters, I draw samples of this idealized model.
+
+```{r}
+Y2.pred = rep(0, n)
+for(i in 1:n){
+  r = j2.samples[sample(length(j2.samples[[1]]), size = 1),]
+  Y2.pred[i] = rnorm(n = 1, 
+                     mean =  as.numeric(r["a"]) + as.numeric(r["b"])*X[i], 
+                     sd = as.numeric(r["sigma"]))
+}
+```
+
+Let's visually evaluate the second model, comparing with the observed data.
+
+```{r}
+df2.pred = cbind(Y2.pred, X)
+hist(Y2.pred,freq = F, breaks=5, col = rgb(0,0,1,0.3), xlim=c(15, 45),xlab="Plastic strength (MPa)")
+lines(density(Y), col=2)
+legend("topright", c("Observed", "Predicted"), col=c(2, rgb(0,0,1,0.3)), lwd = 2)
+```
+
+```{r, echo=F}
+cat("Mean of the observed data:", mean(Y))
+cat("Mean of the predicted data (model 2):", mean(Y2.pred))
+cat("Standard deviation of the observed data:", sd(Y))
+cat("Standard deviation of the predicted data (model 2):", sd(Y2.pred))
+cat("Mean-squared-error (model 2):",mse(actual = Y, predicted = Y2.pred))
+```
+
+Comparing the mean-squared-error of both model (2.7 X 13), it is reasonable to favor the first model. But comparing the mean or even the mean squared error could be a poor technique for choosing models. 
+
+Another way to select models is the Deviance Information Criterion, DIC, a measure of model fit that penalise complex models. The model with the smallest DIC is estimated to be the model that would best predict a replicate dataset which has the same structure as that currently observed. 
+
+The DIC is a good measure when the effective number of parameters is much smaller than the sample size, and the model parameters have a normal posterior distribution. This seemed perfect in my evaluation, since it is at most 4 parameter (model 1), for one hundreds observations, and all with normal distributions.
+
+We could increase the likelihood by increasing the number of coefficients (the complexity of the model), to fit the data exactly, but this is to overfit the data and it is not desirable because models that overfit generalize poorly. The penalty is roughly the number of the effective parameters (j1 = 4 par, j2 = 2)
+
+```{r, echo=F, results=F}
+model.def <- "
+  model {
+    # Priors
+    a ~ dnorm(-4.24, 0.4);
+    b ~ dnorm(0.19, 0.02);
+    c ~ dnorm(-0.97, 0.3);
+    sigma ~ dnorm(0.2, 0.05);
+  
+    #likelihood
+    for(i in 1:n){
+      Y[i] ~ dnorm(a + b*temp[i] + c*pres[i], sigma)
+    }
+}"
+
+model.txt <- textConnection(model.def)
+
+inits=list("a"=-4.24, "b"=0.19, "c" = -0.97, "sigma"=0.2)
+
+params=c("a","b", "c", "sigma")
+dd=list("Y" = Y, "temp" = temp, "pres" = pres, "n"=n)
+j <- jags.model(model.txt, data=dd, n.chains=2,inits = inits, n.adapt = 1000)
+update(j, 5000)
+
+model2.def <- "
+  model {
+    # Priors
+    a ~ dnorm(51.56886, 2);
+    b ~ dnorm(-354.51144, 2);
+    sigma ~ dnorm(0.5, 0.02);
+  
+    #likelihood
+    for(i in 1:n){
+      Y[i] ~ dnorm(a + b*X[i], sigma)
+    }
+  }"
+
+model2.txt <- textConnection(model2.def)
+inits=list("a"=51.56886, "b"=-354.51144, "sigma"=0.5)
+params=c("a","b", "sigma") # Parameters
+dd=list("Y" = Y, "X" = X, "n"=n) # Create the data list
+
+# Do a MCMC
+j2 <- jags.model(model2.txt, data=dd, n.chains=2,
+                 inits = inits, n.adapt = 1000)
+update(j2, 5000)
+```
+
+```{r}
+dic.samples1 = dic.samples(j, 10000)
+dic.samples2 = dic.samples(j2, 10000)
+dic.samples1
+dic.samples2
+```
+
+Model 1 has more parameters, than model 2, but a better fit (355.9 instead of 542), and also a smaller DIC (penalized deviance). Even though the first model is more complex, it outweighs the penalty. Model 1 is preferred.
+
+As complement, I decided to generate samples from the posterior by the acceptance/rejection method, instead of by JAGS.
+
+```{r}
+test.accep.reject = function(n){
+  k = 4
+  sample = numeric()
+  
+  for(i in 1:n){
+    X_samp = df[sample(nrow(df), 1),2:3]
+    Y_samp = rnorm(n = 1, 
+                   mean = sample(a.post, 1) + sample(b.post,1)*X_samp$Temperature +
+                     sample(c.post,1)*X_samp$Pressure, 
+                   sd = sample(sigma.post,1))
+
+    f_y = dnorm(Y_samp, mean = sample(a.post, 1) + sample(b.post,1)*X_samp$Temperature +
+                  sample(c.post,1)*X_samp$Pressure, 
+                sd = sample(sigma.post,1))
+    g_y = dnorm(Y_samp, mean = sample(a.prior, 1) + sample(b.prior,1)*X_samp$Temperature +
+                  sample(c.prior,1)*X_samp$Pressure, 
+                sd = sample(sigma.prior,1))
+    if(!is.nan(g_y)){
+      p = f_y/k*g_y
+      
+      test.p = runif(1, min=0, max=1)
+      if (p < test.p){
+        sample = c(sample, Y_samp)
+      }
+    }
+  }
+  return(sample)
+}
+acc_samp = test.accep.reject(5000)
+```
+
+Comparing the samples generated by the acceptance/rejection method with the observed data, the histogram of both distribution was
+
+```{r, warning=F}
+hist(acc_samp, freq = FALSE, breaks = 10, col = rgb(0,0,1,0.3),main="Observed and acc/reject samples", xlab="Plastic strength (MPa)")
+lines(density(Y),col=2)
+legend("topright", c("Observed", "Acc/Reject"), 
+       col=c(2, rgb(0,0,1,0.3)), lwd = 2)
+```
